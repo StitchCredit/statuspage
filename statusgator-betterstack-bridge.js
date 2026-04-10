@@ -44,18 +44,18 @@ const BETTERSTACK_STATUS_PAGE_ID = process.env.BETTERSTACK_STATUS_PAGE_ID;
 const BUREAU_CONFIG = [
   {
     name: "Equifax",
-    statusgatorMonitorId: "YOUR_EQUIFAX_MONITOR_ID",      // replace
-    betterstackResourceId: "YOUR_EQUIFAX_RESOURCE_ID",     // replace
+    statusgatorMonitorId: "AhL6s1igzR",
+    betterstackResourceId: "8804844",
   },
   {
     name: "TransUnion",
-    statusgatorMonitorId: "YOUR_TRANSUNION_MONITOR_ID",    // replace
-    betterstackResourceId: "YOUR_TRANSUNION_RESOURCE_ID",  // replace
+    statusgatorMonitorId: "hvMTBvQ85W",
+    betterstackResourceId: "8804845",
   },
   {
     name: "Experian",
-    statusgatorMonitorId: "YOUR_EXPERIAN_MONITOR_ID",      // replace
-    betterstackResourceId: "YOUR_EXPERIAN_RESOURCE_ID",    // replace
+    statusgatorMonitorId: "K2JC5Q8YFG",
+    betterstackResourceId: "8804846",
   },
 ];
 
