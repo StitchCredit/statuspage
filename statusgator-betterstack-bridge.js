@@ -25,10 +25,42 @@
  */
 
 // ─── Configuration ──────────────────────────────────────────────────────────
+const fs = require("fs");
+const path = require("path");
 
-const STATUSGATOR_API_KEY = process.env.STATUSGATOR_API_KEY;
-const BETTERSTACK_API_TOKEN = process.env.BETTERSTACK_API_TOKEN;
-const BETTERSTACK_STATUS_PAGE_ID = process.env.BETTERSTACK_STATUS_PAGE_ID;
+function loadDotEnv() {
+  const envPath = path.join(__dirname, ".env");
+  if (!fs.existsSync(envPath)) return;
+
+  const lines = fs.readFileSync(envPath, "utf8").split(/\r?\n/);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const eq = trimmed.indexOf("=");
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const raw = trimmed.slice(eq + 1).trim();
+    const value = raw.replace(/^['"]|['"]$/g, "");
+    if (!(key in process.env)) {
+      process.env[key] = value;
+    }
+  }
+}
+loadDotEnv();
+
+function cleanEnv(name, fallback = "") {
+  const value = process.env[name];
+  if (typeof value !== "string") return fallback;
+  // Guard against copied secrets with spaces or wrapping quotes.
+  return value.trim().replace(/^['"]|['"]$/g, "") || fallback;
+}
+
+const STATUSGATOR_API_KEY = cleanEnv("STATUSGATOR_API_KEY");
+const BETTERSTACK_API_TOKEN = cleanEnv("BETTERSTACK_API_TOKEN");
+const BETTERSTACK_STATUS_PAGE_ID = cleanEnv("BETTERSTACK_STATUS_PAGE_ID");
+const STATUSGATOR_BOARD_ID = cleanEnv("STATUSGATOR_BOARD_ID", "pHomklVeMg");
+const FORCE_STATUS_BUREAU = cleanEnv("FORCE_STATUS_BUREAU");
+const FORCE_STATUS_VALUE = cleanEnv("FORCE_STATUS_VALUE").toLowerCase();
 
 /**
  * Map your StatusGator monitors to Better Stack status page resources.
@@ -64,8 +96,6 @@ const BUREAU_CONFIG = [
 // For GitHub Actions, you can use artifacts or a gist.
 // For simplicity, this uses a local JSON file.
 
-const fs = require("fs");
-const path = require("path");
 const STATE_FILE = path.join(__dirname, ".bridge-state.json");
 
 function loadState() {
@@ -84,18 +114,59 @@ function saveState(state) {
 // ─── StatusGator API ────────────────────────────────────────────────────────
 
 async function fetchStatusGatorMonitor(monitorId) {
+  const headers = { Authorization: `Bearer ${STATUSGATOR_API_KEY}` };
   const res = await fetch(
-    `https://statusgator.com/api/v3/monitors/${monitorId}`,
+    `https://statusgator.com/api/v3/boards/${STATUSGATOR_BOARD_ID}/monitors`,
     {
-      headers: { Authorization: `Bearer ${STATUSGATOR_API_KEY}` },
+      headers: {
+        ...headers,
+        Accept: "application/json",
+      },
     }
   );
 
   if (!res.ok) {
-    throw new Error(`StatusGator API error: ${res.status} ${res.statusText}`);
+    const body = await res.text();
+    if (res.status === 401) {
+      throw new Error(
+        "StatusGator API 401 Access denied. Verify STATUSGATOR_API_KEY is valid for this org and has API access."
+      );
+    }
+    throw new Error(`StatusGator API error: ${res.status} - ${body}`);
   }
 
-  return res.json();
+  const payload = await res.json();
+  const monitors = Array.isArray(payload?.data)
+    ? payload.data
+    : Array.isArray(payload?.monitors)
+      ? payload.monitors
+      : Array.isArray(payload)
+        ? payload
+        : [];
+
+  const selected = monitors.find((m) => {
+    const id = m?.id || m?.monitor_id || m?.attributes?.id;
+    return String(id) === String(monitorId);
+  });
+
+  if (!selected) {
+    throw new Error(
+      `StatusGator monitor ${monitorId} not found on board ${STATUSGATOR_BOARD_ID}`
+    );
+  }
+
+  // Return a shape compatible with existing parsing logic.
+  return {
+    data: {
+      attributes: {
+        status:
+          selected?.attributes?.status ||
+          selected?.status ||
+          selected?.current_status ||
+          selected?.monitor_status,
+      },
+    },
+  };
 }
 
 /**
@@ -115,6 +186,17 @@ function normalizeStatus(sgStatus) {
     default:
       return "operational";
   }
+}
+
+function applyForcedStatus(bureauName, currentStatus) {
+  const allowed = new Set(["operational", "degraded", "downtime", "maintenance"]);
+  if (!FORCE_STATUS_BUREAU || !FORCE_STATUS_VALUE) return currentStatus;
+  if (!allowed.has(FORCE_STATUS_VALUE)) return currentStatus;
+  if (bureauName !== FORCE_STATUS_BUREAU) return currentStatus;
+  console.log(
+    `  [TEST] Forcing ${bureauName} status to ${FORCE_STATUS_VALUE} via env override`
+  );
+  return FORCE_STATUS_VALUE;
 }
 
 // ─── Better Stack Status Page API ───────────────────────────────────────────
@@ -153,7 +235,7 @@ async function createStatusReport(bureau, status, message) {
   return data.data.id;
 }
 
-async function resolveStatusReport(reportId) {
+async function resolveStatusReport(bureau, reportId) {
   // To resolve, we update the report with a resolution message
   const res = await fetch(
     `https://uptime.betterstack.com/api/v2/status-pages/${BETTERSTACK_STATUS_PAGE_ID}/status-reports/${reportId}/status-updates`,
@@ -165,7 +247,12 @@ async function resolveStatusReport(reportId) {
       },
       body: JSON.stringify({
         message: "Service has recovered. StatusGator reports operational status.",
-        status: "resolved",
+        affected_resources: [
+          {
+            status_page_resource_id: bureau.betterstackResourceId,
+            status: "resolved",
+          },
+        ],
       }),
     }
   );
@@ -196,7 +283,10 @@ async function sync() {
         monitorData?.status ||
         "up";
 
-      const currentStatus = normalizeStatus(rawStatus);
+      const currentStatus = applyForcedStatus(
+        bureau.name,
+        normalizeStatus(rawStatus)
+      );
       const previousState = state[bureau.name] || {
         status: "operational",
         reportId: null,
@@ -224,7 +314,7 @@ async function sync() {
         previousState.reportId
       ) {
         console.log(`  ✓ Resolving report for ${bureau.name}...`);
-        await resolveStatusReport(previousState.reportId);
+        await resolveStatusReport(bureau, previousState.reportId);
         state[bureau.name] = { status: "operational", reportId: null };
         console.log(`  ✓ Report resolved`);
       }
@@ -237,7 +327,7 @@ async function sync() {
       ) {
         // Resolve old, create new with updated severity
         if (previousState.reportId) {
-          await resolveStatusReport(previousState.reportId);
+          await resolveStatusReport(bureau, previousState.reportId);
         }
         const reportId = await createStatusReport(bureau, currentStatus);
         state[bureau.name] = { status: currentStatus, reportId };
