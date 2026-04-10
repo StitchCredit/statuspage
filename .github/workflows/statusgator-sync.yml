@@ -3,7 +3,7 @@ name: StatusGator → Better Stack Sync
 on:
   schedule:
     # Run every 3 minutes
-    - cron: '*/3 * * * *'
+    - cron: '*/5 * * * *'
   workflow_dispatch: # Allow manual runs
 
 jobs:
@@ -29,4 +29,5 @@ jobs:
           STATUSGATOR_API_KEY: ${{ secrets.STATUSGATOR_API_KEY }}
           BETTERSTACK_API_TOKEN: ${{ secrets.BETTERSTACK_API_TOKEN }}
           BETTERSTACK_STATUS_PAGE_ID: ${{ secrets.BETTERSTACK_STATUS_PAGE_ID }}
+          STATUSGATOR_BOARD_ID: ${{ secrets.STATUSGATOR_BOARD_ID }}
         run: node statusgator-betterstack-bridge.js
