@@ -59,8 +59,25 @@ const STATUSGATOR_API_KEY = cleanEnv("STATUSGATOR_API_KEY");
 const BETTERSTACK_API_TOKEN = cleanEnv("BETTERSTACK_API_TOKEN");
 const BETTERSTACK_STATUS_PAGE_ID = cleanEnv("BETTERSTACK_STATUS_PAGE_ID");
 const STATUSGATOR_BOARD_ID = cleanEnv("STATUSGATOR_BOARD_ID", "pHomklVeMg");
+const STATUSGATOR_API_KEY_LEXISMERIDIAN = cleanEnv(
+  "STATUSGATOR_API_KEY_LEXISMERIDIAN"
+);
+const STATUSGATOR_BOARD_ID_LEXISMERIDIAN = cleanEnv(
+  "STATUSGATOR_BOARD_ID_LEXISMERIDIAN"
+);
 const FORCE_STATUS_BUREAU = cleanEnv("FORCE_STATUS_BUREAU");
 const FORCE_STATUS_VALUE = cleanEnv("FORCE_STATUS_VALUE").toLowerCase();
+
+const STATUSGATOR_SOURCES = {
+  primary: {
+    apiKey: STATUSGATOR_API_KEY,
+    boardId: STATUSGATOR_BOARD_ID,
+  },
+  secondary: {
+    apiKey: STATUSGATOR_API_KEY_LEXISMERIDIAN,
+    boardId: STATUSGATOR_BOARD_ID_LEXISMERIDIAN,
+  },
+};
 
 /**
  * Map your StatusGator monitors to Better Stack status page resources.
@@ -78,16 +95,31 @@ const BUREAU_CONFIG = [
     name: "Equifax",
     statusgatorMonitorId: "AhL6s1igzR",
     betterstackResourceId: "8804844",
+    statusgatorSource: "primary",
   },
   {
     name: "TransUnion",
     statusgatorMonitorId: "hvMTBvQ85W",
     betterstackResourceId: "8804845",
+    statusgatorSource: "primary",
   },
   {
     name: "Experian",
     statusgatorMonitorId: "K2JC5Q8YFG",
     betterstackResourceId: "8804846",
+    statusgatorSource: "primary",
+  },
+  {
+    name: "LexisNexis Risk",
+    statusgatorMonitorId: "K2FQ5Q8YFG",
+    betterstackResourceId: "8804846",
+    statusgatorSource: "secondary",
+  },
+  {
+    name: "MeridianLink",
+    statusgatorMonitorId: "IWJIvBlcSU",
+    betterstackResourceId: "8804846",
+    statusgatorSource: "secondary",
   },
 ];
 
@@ -113,10 +145,17 @@ function saveState(state) {
 
 // ─── StatusGator API ────────────────────────────────────────────────────────
 
-async function fetchStatusGatorMonitor(monitorId) {
-  const headers = { Authorization: `Bearer ${STATUSGATOR_API_KEY}` };
+async function fetchStatusGatorMonitor(monitorId, sourceKey = "primary") {
+  const source = STATUSGATOR_SOURCES[sourceKey];
+  if (!source?.apiKey || !source?.boardId) {
+    throw new Error(
+      `StatusGator source "${sourceKey}" is not configured. Check its API key and board ID env vars.`
+    );
+  }
+
+  const headers = { Authorization: `Bearer ${source.apiKey}` };
   const res = await fetch(
-    `https://statusgator.com/api/v3/boards/${STATUSGATOR_BOARD_ID}/monitors`,
+    `https://statusgator.com/api/v3/boards/${source.boardId}/monitors`,
     {
       headers: {
         ...headers,
@@ -129,7 +168,7 @@ async function fetchStatusGatorMonitor(monitorId) {
     const body = await res.text();
     if (res.status === 401) {
       throw new Error(
-        "StatusGator API 401 Access denied. Verify STATUSGATOR_API_KEY is valid for this org and has API access."
+        `StatusGator API 401 Access denied for source "${sourceKey}". Verify its API key is valid for that org and has API access.`
       );
     }
     throw new Error(`StatusGator API error: ${res.status} - ${body}`);
@@ -151,7 +190,7 @@ async function fetchStatusGatorMonitor(monitorId) {
 
   if (!selected) {
     throw new Error(
-      `StatusGator monitor ${monitorId} not found on board ${STATUSGATOR_BOARD_ID}`
+      `StatusGator monitor ${monitorId} not found on board ${source.boardId} (source "${sourceKey}")`
     );
   }
 
@@ -273,7 +312,8 @@ async function sync() {
       console.log(`Checking ${bureau.name}...`);
 
       const monitorData = await fetchStatusGatorMonitor(
-        bureau.statusgatorMonitorId
+        bureau.statusgatorMonitorId,
+        bureau.statusgatorSource || "primary"
       );
 
       // The API response structure may vary — adjust based on actual v3 response
