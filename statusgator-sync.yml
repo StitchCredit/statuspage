@@ -1,0 +1,33 @@
+name: StatusGator → Better Stack Sync
+
+on:
+  schedule:
+    # Run every 3 minutes
+    - cron: '*/3 * * * *'
+  workflow_dispatch: # Allow manual runs
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      # Restore state from previous run
+      - name: Restore state
+        uses: actions/cache@v4
+        with:
+          path: .bridge-state.json
+          key: bridge-state-${{ github.run_id }}
+          restore-keys: bridge-state-
+
+      - name: Run sync
+        env:
+          STATUSGATOR_API_KEY: ${{ secrets.STATUSGATOR_API_KEY }}
+          BETTERSTACK_API_TOKEN: ${{ secrets.BETTERSTACK_API_TOKEN }}
+          BETTERSTACK_STATUS_PAGE_ID: ${{ secrets.BETTERSTACK_STATUS_PAGE_ID }}
+          NOTIFY_WEBHOOK_URL: ${{ secrets.NOTIFY_WEBHOOK_URL }}
+        run: node statusgator-betterstack-bridge.js
