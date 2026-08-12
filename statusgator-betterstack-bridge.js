@@ -113,13 +113,13 @@ const BUREAU_CONFIG = [
   {
     name: "LexisNexis Risk",
     statusgatorMonitorId: "K2FQ5Q8YFG",
-    betterstackResourceId: "8804846",
+    betterstackResourceId: "8810940",
     statusgatorSource: "secondary",
   },
   {
     name: "MeridianLink",
     statusgatorMonitorId: "IWJIvBlcSU",
-    betterstackResourceId: "8804846",
+    betterstackResourceId: "8810941",
     statusgatorSource: "secondary",
   },
 ];
@@ -334,8 +334,29 @@ async function createStatusReport(bureau, status, message) {
   return data.data.id;
 }
 
-async function resolveStatusReport(bureau, reportId) {
-  // To resolve, we update the report with a resolution message
+async function resolveStatusReport(bureau, reportId, previousStatus) {
+  if (previousStatus === "maintenance") {
+    const res = await fetch(
+      `https://uptime.betterstack.com/api/v2/status-pages/${BETTERSTACK_STATUS_PAGE_ID}/status-reports/${reportId}`,
+      {
+        method: "PATCH",
+        headers: {
+          Authorization: `Bearer ${BETTERSTACK_API_TOKEN}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          ends_at: new Date().toISOString(),
+        }),
+      }
+    );
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Better Stack resolve error: ${res.status} - ${body}`);
+    }
+    return;
+  }
+
   const res = await fetch(
     `https://uptime.betterstack.com/api/v2/status-pages/${BETTERSTACK_STATUS_PAGE_ID}/status-reports/${reportId}/status-updates`,
     {
@@ -414,7 +435,7 @@ async function sync() {
         previousState.reportId
       ) {
         console.log(`  ✓ Resolving report for ${bureau.name}...`);
-        await resolveStatusReport(bureau, previousState.reportId);
+        await resolveStatusReport(bureau, previousState.reportId, previousState.status);
         state[bureau.name] = { status: "operational", reportId: null };
         console.log(`  ✓ Report resolved`);
         await sendNotification(bureau, previousState.status, currentStatus);
@@ -428,7 +449,7 @@ async function sync() {
       ) {
         // Resolve old, create new with updated severity
         if (previousState.reportId) {
-          await resolveStatusReport(bureau, previousState.reportId);
+          await resolveStatusReport(bureau, previousState.reportId, previousState.status);
         }
         const reportId = await createStatusReport(bureau, currentStatus);
         state[bureau.name] = { status: currentStatus, reportId };
