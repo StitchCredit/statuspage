@@ -16,14 +16,6 @@ jobs:
         with:
           node-version: '20'
 
-      # Restore state from previous run
-      - name: Restore state
-        uses: actions/cache@v4
-        with:
-          path: .bridge-state.json
-          key: bridge-state-${{ github.run_id }}
-          restore-keys: bridge-state-
-
       - name: Run sync
         env:
           STATUSGATOR_API_KEY: ${{ secrets.STATUSGATOR_API_KEY }}

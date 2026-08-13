@@ -76,8 +76,7 @@ const BUREAU_CONFIG = [
 
 1. Package the script as a Lambda function
 2. Create an EventBridge rule: `rate(3 minutes)`
-3. Store state in SSM Parameter Store instead of a file
-4. Free tier: 1M requests/month
+3. Free tier: 1M requests/month
 
 #### Option C: Railway / Render / Fly.io cron
 
@@ -98,5 +97,5 @@ The GitHub Actions minute usage is tight on private repos (2000 min/month free).
 
 - **StatusGator API returns 401**: Check your API key. Free plan API access is confirmed at 15 req/min.
 - **Better Stack returns 422**: Verify your resource IDs exist and are "ManuallyTrackedItem" type.
-- **State file issues on GitHub Actions**: The cache action preserves state between runs. If state gets corrupted, delete the cache from the Actions tab.
+- **Report seems stuck on the status page**: The bridge treats Better Stack as the source of truth every run (it fetches each resource's live status and any open reports directly from the API), so a bad run or a mis-scoped report can't get permanently stuck from a bridge bug — the next run resolves any open report that no longer matches StatusGator's status. If something still looks wrong, check the report's `affected_resources` in the Better Stack dashboard for the correct resource ID.
 - **StatusGator monitor shows no data for a bureau**: The credit bureaus don't have official status pages, so StatusGator relies on community reports. Status may stay "up" unless there's a confirmed widespread issue.

@@ -124,26 +124,6 @@ const BUREAU_CONFIG = [
   },
 ];
 
-// ─── State tracking ─────────────────────────────────────────────────────────
-// In a serverless/cron context, use a simple JSON file or KV store.
-// For GitHub Actions, you can use artifacts or a gist.
-// For simplicity, this uses a local JSON file.
-
-const STATE_FILE = path.join(__dirname, ".bridge-state.json");
-
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-  } catch {
-    return {};
-    // State shape: { "Equifax": { status: "up", reportId: null }, ... }
-  }
-}
-
-function saveState(state) {
-  fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
-}
-
 // ─── StatusGator API ────────────────────────────────────────────────────────
 
 async function fetchStatusGatorMonitor(monitorId, sourceKey = "primary") {
@@ -334,8 +314,10 @@ async function createStatusReport(bureau, status, message) {
   return data.data.id;
 }
 
-async function resolveStatusReport(bureau, reportId, previousStatus) {
-  if (previousStatus === "maintenance") {
+async function resolveOpenReport(bureau, report) {
+  const reportId = report.id;
+
+  if (report.attributes.report_type === "maintenance") {
     const res = await fetch(
       `https://uptime.betterstack.com/api/v2/status-pages/${BETTERSTACK_STATUS_PAGE_ID}/status-reports/${reportId}`,
       {
@@ -383,10 +365,65 @@ async function resolveStatusReport(bureau, reportId, previousStatus) {
   }
 }
 
+/**
+ * Better Stack is the source of truth for what's currently shown on the page —
+ * we never trust locally-cached "previous status" here. A GitHub Actions cache
+ * miss (or a race between concurrent runs) used to silently reset that cache,
+ * which made the bridge think a bureau was already operational and skip
+ * resolving a report that was still open, orphaning it on the status page.
+ */
+async function fetchResourceStatus(resourceId) {
+  const res = await fetch(
+    `https://uptime.betterstack.com/api/v2/status-pages/${BETTERSTACK_STATUS_PAGE_ID}/resources/${resourceId}`,
+    { headers: { Authorization: `Bearer ${BETTERSTACK_API_TOKEN}` } }
+  );
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`Better Stack get resource error: ${res.status} - ${body}`);
+  }
+
+  const payload = await res.json();
+  return payload.data.attributes.status;
+}
+
+async function fetchAllStatusPageReports() {
+  const reports = [];
+  let url = `https://uptime.betterstack.com/api/v2/status-pages/${BETTERSTACK_STATUS_PAGE_ID}/status-reports`;
+
+  while (url) {
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${BETTERSTACK_API_TOKEN}` },
+    });
+
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`Better Stack list reports error: ${res.status} - ${body}`);
+    }
+
+    const payload = await res.json();
+    reports.push(...payload.data);
+    url = payload.pagination?.next || null;
+  }
+
+  return reports;
+}
+
+/** Reports whose aggregate_state is still non-resolved and that name this resource. */
+function findOpenReportsForResource(allReports, resourceId) {
+  return allReports.filter(
+    (report) =>
+      report.attributes.aggregate_state !== "resolved" &&
+      report.attributes.affected_resources.some(
+        (r) => String(r.status_page_resource_id) === String(resourceId)
+      )
+  );
+}
+
 // ─── Main sync logic ────────────────────────────────────────────────────────
 
 async function sync() {
-  const state = loadState();
+  const allReports = await fetchAllStatusPageReports();
 
   for (const bureau of BUREAU_CONFIG) {
     try {
@@ -407,66 +444,52 @@ async function sync() {
         bureau.name,
         normalizeStatus(rawStatus)
       );
-      const previousState = state[bureau.name] || {
-        status: "operational",
-        reportId: null,
-      };
-
-      console.log(
-        `  ${bureau.name}: ${previousState.status} → ${currentStatus}`
+      const actualStatus = await fetchResourceStatus(bureau.betterstackResourceId);
+      const openReports = findOpenReportsForResource(
+        allReports,
+        bureau.betterstackResourceId
       );
 
-      // Status went from OK to NOT OK → create a report
-      if (
-        currentStatus !== "operational" &&
-        previousState.status === "operational"
-      ) {
-        console.log(`  ⚠ Creating status report for ${bureau.name}...`);
-        const reportId = await createStatusReport(bureau, currentStatus);
-        state[bureau.name] = { status: currentStatus, reportId };
-        console.log(`  ✓ Report created: ${reportId}`);
-        await sendNotification(bureau, previousState.status, currentStatus);
+      console.log(`  ${bureau.name}: ${actualStatus} → ${currentStatus}`);
+
+      if (currentStatus === actualStatus) {
+        continue;
       }
 
-      // Status went from NOT OK to OK → resolve the report
-      else if (
-        currentStatus === "operational" &&
-        previousState.status !== "operational" &&
-        previousState.reportId
-      ) {
-        console.log(`  ✓ Resolving report for ${bureau.name}...`);
-        await resolveStatusReport(bureau, previousState.reportId, previousState.status);
-        state[bureau.name] = { status: "operational", reportId: null };
-        console.log(`  ✓ Report resolved`);
-        await sendNotification(bureau, previousState.status, currentStatus);
+      // Status went from OK to NOT OK → create a report
+      if (currentStatus !== "operational" && actualStatus === "operational") {
+        console.log(`  ⚠ Creating status report for ${bureau.name}...`);
+        const reportId = await createStatusReport(bureau, currentStatus);
+        console.log(`  ✓ Report created: ${reportId}`);
+        await sendNotification(bureau, actualStatus, currentStatus);
+      }
+
+      // Status went from NOT OK to OK → resolve any open reports
+      else if (currentStatus === "operational" && actualStatus !== "operational") {
+        console.log(
+          `  ✓ Resolving ${openReports.length} open report(s) for ${bureau.name}...`
+        );
+        for (const report of openReports) {
+          await resolveOpenReport(bureau, report);
+        }
+        console.log(`  ✓ Resolved`);
+        await sendNotification(bureau, actualStatus, currentStatus);
       }
 
       // Status changed but still not OK (e.g., warn → down)
-      else if (
-        currentStatus !== "operational" &&
-        previousState.status !== "operational" &&
-        currentStatus !== previousState.status
-      ) {
-        // Resolve old, create new with updated severity
-        if (previousState.reportId) {
-          await resolveStatusReport(bureau, previousState.reportId, previousState.status);
+      else {
+        for (const report of openReports) {
+          await resolveOpenReport(bureau, report);
         }
         const reportId = await createStatusReport(bureau, currentStatus);
-        state[bureau.name] = { status: currentStatus, reportId };
         console.log(`  ↔ Status changed, report updated: ${reportId}`);
-        await sendNotification(bureau, previousState.status, currentStatus);
-      }
-
-      // No change
-      else {
-        state[bureau.name] = { ...previousState, status: currentStatus };
+        await sendNotification(bureau, actualStatus, currentStatus);
       }
     } catch (err) {
       console.error(`  ✗ Error checking ${bureau.name}:`, err.message);
     }
   }
 
-  saveState(state);
   console.log("Sync complete.");
 }
 
