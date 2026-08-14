@@ -409,15 +409,22 @@ async function fetchAllStatusPageReports() {
   return reports;
 }
 
-/** Reports whose aggregate_state is still non-resolved and that name this resource. */
+/**
+ * Reports that are currently live for this resource: not yet resolved, and
+ * already started. A future-dated maintenance window (starts_at in the
+ * future) is scheduled but not yet in effect — it isn't responsible for the
+ * resource's current status and must not be "resolved" as if it were.
+ */
 function findOpenReportsForResource(allReports, resourceId) {
-  return allReports.filter(
-    (report) =>
-      report.attributes.aggregate_state !== "resolved" &&
-      report.attributes.affected_resources.some(
-        (r) => String(r.status_page_resource_id) === String(resourceId)
-      )
-  );
+  const now = Date.now();
+  return allReports.filter((report) => {
+    const attrs = report.attributes;
+    if (attrs.aggregate_state === "resolved") return false;
+    if (attrs.starts_at && new Date(attrs.starts_at).getTime() > now) return false;
+    return attrs.affected_resources.some(
+      (r) => String(r.status_page_resource_id) === String(resourceId)
+    );
+  });
 }
 
 // ─── Main sync logic ────────────────────────────────────────────────────────
