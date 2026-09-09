@@ -58,6 +58,41 @@ const BUREAU_CONFIG = [
 ];
 ```
 
+#### Scoping a vendor to the products you actually use
+
+Some vendors publish one status page covering dozens of products. StatusGator
+collapses that to a single `up`/`warn`/`down`, so an outage in a product you
+don't call still shows as a full vendor outage on your page. LexisNexis did
+exactly that: their Asset Verification Solution was in major outage for a week
+while every service CRS calls stayed operational.
+
+Add `componentScope` to a bureau to bypass StatusGator for that vendor and read
+their own Statuspage component list instead, reporting the worst status across
+only the components you depend on:
+
+```js
+{
+  name: "LexisNexis Risk",
+  betterstackResourceId: "8810940",
+  componentScope: {
+    statusPageApi: "https://status.lexisnexisrisk.com/api/v2/components.json",
+    components: [
+      "LexisNexis® Accurint® XML (wsonline)", // LNR4302
+      "LexisNexis® Bridger Insight® U.S. 5",  // LNR4201
+      "LexisNexis® RiskView™",                // LNR4005
+    ],
+  },
+}
+```
+
+Names are matched on letters and digits only, so punctuation and trademark
+symbols can drift without breaking the match. If **none** of the configured
+names match, the bridge throws and leaves that resource untouched rather than
+reporting a false all-clear. If only some match, it warns and continues with
+the rest. Component states map as: `operational` stays operational,
+`degraded_performance` and `partial_outage` become degraded, `major_outage`
+becomes downtime, and `under_maintenance` becomes maintenance.
+
 ### 4. Deploy (pick one — all free)
 
 #### Option A: GitHub Actions (recommended)

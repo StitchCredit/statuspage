@@ -115,6 +115,19 @@ const BUREAU_CONFIG = [
     statusgatorMonitorId: "K2FQ5Q8YFG",
     betterstackResourceId: "8810940",
     statusgatorSource: "secondary",
+    // LexisNexis publishes one status for ~39 products and StatusGator
+    // collapses that to a single up/warn/down, so an outage in a product we
+    // don't consume reads as a full LexisNexis outage on our page. Asset
+    // Verification did exactly that for a week. Read the vendor's own
+    // component list instead and report only what CRS actually calls.
+    componentScope: {
+      statusPageApi: "https://status.lexisnexisrisk.com/api/v2/components.json",
+      components: [
+        "LexisNexis® Accurint® XML (wsonline)", // LNR4302 Accurint Liens & Judgments
+        "LexisNexis® Bridger Insight® U.S. 5", // LNR4201 Bridger XGS, OFAC/sanctions/PEP
+        "LexisNexis® RiskView™", // LNR4005 RiskView Liens & Judgments
+      ],
+    },
   },
   {
     name: "MeridianLink",
@@ -209,6 +222,79 @@ function normalizeStatus(sgStatus) {
     default:
       return "operational";
   }
+}
+
+// ─── Vendor component scoping ───────────────────────────────────────────────
+
+/** Statuspage.io component states → our four states. */
+const COMPONENT_STATUS_MAP = {
+  operational: "operational",
+  degraded_performance: "degraded",
+  partial_outage: "degraded",
+  major_outage: "downtime",
+  under_maintenance: "maintenance",
+};
+
+const STATUS_SEVERITY = {
+  operational: 0,
+  maintenance: 1,
+  degraded: 2,
+  downtime: 3,
+};
+
+/**
+ * Read a vendor's own Statuspage component list and report the worst status
+ * across only the components we depend on, ignoring products we don't call.
+ */
+async function fetchScopedComponentStatus(bureau) {
+  const { statusPageApi, components } = bureau.componentScope;
+
+  const res = await fetch(statusPageApi, { headers: { Accept: "application/json" } });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(
+      `Component API error for ${bureau.name}: ${res.status} - ${body.slice(0, 200)}`
+    );
+  }
+
+  const payload = await res.json();
+  // Vendors reformat names often, so compare on letters and digits only.
+  const normalize = (name) => name.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const wanted = new Set(components.map(normalize));
+  const matched = (payload.components || []).filter((c) =>
+    wanted.has(normalize(c.name))
+  );
+
+  // Never fall through to "operational" on zero matches. If the vendor renames
+  // a component, we want a loud failure that leaves the page untouched, not a
+  // silent all-clear for dependencies we can no longer see.
+  if (matched.length === 0) {
+    throw new Error(
+      `No configured components matched for ${bureau.name}. ` +
+        `Check componentScope.components against ${statusPageApi}`
+    );
+  }
+
+  if (matched.length < components.length) {
+    const found = new Set(matched.map((c) => normalize(c.name)));
+    const missing = components.filter((c) => !found.has(normalize(c)));
+    console.warn(
+      `  ! Component(s) not found for ${bureau.name}: ${missing.join(", ")}`
+    );
+  }
+
+  let worst = "operational";
+  for (const component of matched) {
+    const mapped = COMPONENT_STATUS_MAP[component.status] || "operational";
+    if (mapped !== "operational") {
+      console.log(`    ${component.name}: ${component.status}`);
+    }
+    if (STATUS_SEVERITY[mapped] > STATUS_SEVERITY[worst]) {
+      worst = mapped;
+    }
+  }
+
+  return worst;
 }
 
 function applyForcedStatus(bureauName, currentStatus) {
@@ -436,21 +522,25 @@ async function sync() {
     try {
       console.log(`Checking ${bureau.name}...`);
 
-      const monitorData = await fetchStatusGatorMonitor(
-        bureau.statusgatorMonitorId,
-        bureau.statusgatorSource || "primary"
-      );
+      let sourceStatus;
+      if (bureau.componentScope) {
+        sourceStatus = await fetchScopedComponentStatus(bureau);
+      } else {
+        const monitorData = await fetchStatusGatorMonitor(
+          bureau.statusgatorMonitorId,
+          bureau.statusgatorSource || "primary"
+        );
 
-      // The API response structure may vary — adjust based on actual v3 response
-      // Typically: monitorData.data.attributes.status
-      const rawStatus =
-        monitorData?.data?.attributes?.status ||
-        monitorData?.status;
+        // The API response structure may vary — adjust based on actual v3 response
+        // Typically: monitorData.data.attributes.status
+        const rawStatus =
+          monitorData?.data?.attributes?.status ||
+          monitorData?.status;
 
-      const currentStatus = applyForcedStatus(
-        bureau.name,
-        normalizeStatus(rawStatus)
-      );
+        sourceStatus = normalizeStatus(rawStatus);
+      }
+
+      const currentStatus = applyForcedStatus(bureau.name, sourceStatus);
       const actualStatus = await fetchResourceStatus(bureau.betterstackResourceId);
       const openReports = findOpenReportsForResource(
         allReports,
